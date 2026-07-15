@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+.env
+
+# IDE
+.vscode/
+
+# Logs
+*.log
+runs/
+
+# Model checkpoints
+*.pth
+*.pt
+
+# Generated data
+src/data/
+outputs/
+
+# Misc
+.DS_Store
+Thumbs.db
