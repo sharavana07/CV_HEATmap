@@ -13,6 +13,21 @@ Outputs
 
 All plots are saved automatically; the script can also be imported and its
 functions called from a Jupyter notebook.
+
+Index alignment
+────────────────
+dataset.py is the single source of truth for FLAT removal, binary label
+conversion, and (global_idx, binary_label) pairing (see Sample in
+cnn/dataset.py). This script NEVER recomputes indices or re-runs a temporal
+split against the raw label array — doing so would use a different index
+space (raw 3-class length) than the one build_dataloaders() actually split
+on (post-FLAT-removal binary sample count), silently misaligning
+predictions.csv against the wrong heatmaps.
+
+Instead, the test split's global heatmap indices are read directly off the
+test_loader's own dataset: test_loader.dataset.samples is the exact list of
+Sample(global_idx, label) pairs build_dataloaders() constructed internally.
+That is the only place this script gets indices from.
 """
 
 from __future__ import annotations
@@ -25,6 +40,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib
 matplotlib.use("Agg")   # headless — no display required
@@ -41,6 +57,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cnn import config as cfg
 from cnn.model import OrderBookCNN
+from cnn.dataset import build_dataloaders
 from cnn.utils import get_device
 
 log = logging.getLogger(__name__)
@@ -74,7 +91,6 @@ def run_inference(
     pred_labels   : (N,) int
     prob_up       : (N,) float  — probability of class 1 (UP)
     """
-    import torch.nn as nn
     model.eval()
     all_true, all_pred, all_prob = [], [], []
 
@@ -247,7 +263,9 @@ def save_predictions_csv(
 
     Columns
     ───────
-    sample_index   : original chronological index in the full dataset
+    sample_index   : the ORIGINAL global heatmap index for this row, i.e.
+                     hm_{sample_index:06d}.npy — taken verbatim from each
+                     test-split Sample.global_idx, never recomputed here.
     true_label     : 0 = DOWN, 1 = UP
     predicted_label: model prediction
     probability_up : P(UP) from softmax
@@ -267,10 +285,10 @@ def save_predictions_csv(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def evaluate(
-    model:       torch.nn.Module,
-    test_loader: torch.utils.data.DataLoader,
+    model:        torch.nn.Module,
+    test_loader:  torch.utils.data.DataLoader,
     test_indices: np.ndarray,
-    history:     Optional[Dict[str, List]] = None,
+    history:      Optional[Dict[str, List]] = None,
 ) -> Dict[str, float]:
     """
     Run full evaluation: metrics, plots, predictions CSV.
@@ -278,8 +296,11 @@ def evaluate(
     Parameters
     ----------
     model        : trained OrderBookCNN (best checkpoint already loaded)
-    test_loader  : DataLoader for the held-out test split
-    test_indices : global sample indices for the test split (for CSV)
+    test_loader  : DataLoader for the held-out test split, as returned by
+                   cnn.dataset.build_dataloaders()
+    test_indices : global heatmap indices for the test split, i.e.
+                   [s.global_idx for s in test_loader.dataset.samples] —
+                   must come from the test dataset itself, never recomputed
     history      : training history dict (from train.py); if supplied,
                    loss/accuracy curves are plotted
     """
@@ -289,6 +310,14 @@ def evaluate(
     # ── Inference ─────────────────────────────────────────────────────
     log.info("Running inference on test set …")
     true, pred, prob_up = run_inference(model, test_loader, device)
+
+    if len(test_indices) != len(true):
+        raise ValueError(
+            f"test_indices length ({len(test_indices)}) does not match the "
+            f"number of test predictions ({len(true)}). test_indices must "
+            "come from test_loader.dataset.samples, not a separately "
+            "computed split."
+        )
 
     # ── Metrics ───────────────────────────────────────────────────────
     metrics, fpr, tpr = compute_metrics(true, pred, prob_up)
@@ -352,24 +381,32 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(str(cfg.BEST_MODEL_PATH), map_location=device))
     log.info("Loaded checkpoint: %s", cfg.BEST_MODEL_PATH)
 
-    # Labels
-    lbl_path = cfg.LABELS_PATH if cfg.LABELS_PATH.exists() else cfg.LABELS_ALT_PATH
-    labels   = np.load(str(lbl_path))
+    # Raw, 3-class, file-order-aligned labels (0=DOWN, 1=FLAT, 2=UP).
+    # No filtering, remapping, or splitting here — build_dataloaders() owns
+    # all of that internally, exactly as it does in train.py.
+    lbl_path   = cfg.LABELS_PATH if cfg.LABELS_PATH.exists() else cfg.LABELS_ALT_PATH
+    raw_labels = np.load(str(lbl_path))
 
-    # DataLoaders (re-create to get test_loader and test_indices)
-    from cnn.dataset import build_dataloaders, temporal_split
-    n = len(labels)
-    train_idx, val_idx, test_idx = temporal_split(n)
-
+    # DataLoaders (re-create with the same raw labels/heatmaps used in
+    # training, so the temporal split and normalisation stats match).
     if cfg.HEATMAP_DIR.exists():
-        _, _, test_loader, _, _ = build_dataloaders(labels, heatmap_dir=cfg.HEATMAP_DIR)
+        _, _, test_loader, _, _ = build_dataloaders(raw_labels, heatmap_dir=cfg.HEATMAP_DIR)
     else:
         log.warning("Heatmap dir not found — using synthetic data.")
-        arr = np.random.rand(n, cfg.IMG_HEIGHT, cfg.IMG_WIDTH).astype(np.float32)
-        _, _, test_loader, _, _ = build_dataloaders(labels, heatmap_array=arr)
+        arr = np.random.rand(len(raw_labels), cfg.IMG_HEIGHT, cfg.IMG_WIDTH).astype(np.float32)
+        _, _, test_loader, _, _ = build_dataloaders(raw_labels, heatmap_array=arr)
+
+    # The test split's global heatmap indices come straight from the Sample
+    # objects the dataset pipeline built — the only place indices are read
+    # from. This is guaranteed to line up 1:1 with what run_inference()
+    # iterates over, since it's the same underlying dataset.
+    test_indices = np.array(
+        [sample.global_idx for sample in test_loader.dataset.samples],
+        dtype=np.int64,
+    )
 
     # Load training history if available
     hist_path = cfg.RESULTS_DIR / "training_history.json"
     history   = json.loads(hist_path.read_text()) if hist_path.exists() else None
 
-    evaluate(model, test_loader, test_idx, history=history)
+    evaluate(model, test_loader, test_indices, history=history)
