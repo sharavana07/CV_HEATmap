@@ -56,7 +56,8 @@ from sklearn.metrics import (
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cnn import config as cfg
-from cnn.model import OrderBookCNN
+# from cnn.model import OrderBookCNN
+from model_se import OrderBookCNN
 from cnn.dataset import build_dataloaders
 from cnn.utils import get_device
 

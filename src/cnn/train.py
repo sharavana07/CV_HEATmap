@@ -41,6 +41,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cnn import config as cfg
 from cnn.model import OrderBookCNN, print_model_summary
+from model_se import OrderBookCNN
 from cnn.dataset import build_dataloaders
 from cnn.utils import set_seed, get_device, EarlyStopping
 
@@ -52,9 +53,13 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _try_get_gpu_util() -> Optional[float]:
-    """Return GPU utilisation % or None if pynvml unavailable."""
+    """Return GPU utilisation % or None if pynvml is unavailable."""
     try:
         import pynvml
+    except ImportError:
+        return None
+
+    try:
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         util   = pynvml.nvmlDeviceGetUtilizationRates(handle)

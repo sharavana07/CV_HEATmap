@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR        = PROJECT_ROOT / "src" / "data"
 HEATMAP_DIR     = DATA_DIR / "heatmaps_npy"          # folder of .npy heatmap files
 LABELS_PATH     = DATA_DIR / "labels_final.npy"  # primary label source
-#LABELS_ALT_PATH = DATA_DIR / "labels.npy"         # fallback
+LABELS_ALT_PATH = DATA_DIR / "labels.npy"         # fallback
 MID_PRICES_PATH = DATA_DIR / "mid_prices.npy"
 
 OUTPUT_DIR      = PROJECT_ROOT / "outputs"
@@ -84,6 +84,7 @@ GRAD_CLIP_NORM   = 1.0       # max gradient norm; None to disable
 
 # Mixed precision (AMP) — requires CUDA
 USE_AMP = True
+LABEL_SMOOTHING = 0.1
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LEARNING RATE SCHEDULER

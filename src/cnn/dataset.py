@@ -261,12 +261,16 @@ def compute_mean_std(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def temporal_split(
-    samples: Sequence[Sample],
+    samples: Sequence[Sample] | int,
     train_ratio: float = cfg.TRAIN_RATIO,
     val_ratio:   float = cfg.VAL_RATIO,
-) -> Tuple[List[Sample], List[Sample], List[Sample]]:
+) -> Tuple[List[Sample] | List[int], List[Sample] | List[int], List[Sample] | List[int]]:
     """
     Split samples chronologically into train / val / test lists.
+
+    The function accepts either a sequence of samples or a simple integer
+    number of rows. The integer form is handy for preprocessing utilities
+    that only need index ranges and do not want to build a full sample list.
 
     Splits on POSITION IN THE SAMPLE LIST (which is already in original
     temporal order, per build_binary_samples), not on global_idx values —
@@ -274,23 +278,19 @@ def temporal_split(
     slicing by global_idx would silently drop or duplicate samples near the
     split boundaries. Slicing the samples list itself is always correct
     because each entry already carries its own global_idx.
-
-    Why temporal (not random) split?
-    ─────────────────────────────────
-    Financial time-series are non-stationary and auto-correlated. A random
-    shuffle would place future market states inside the training set, allowing
-    the model to 'see the future' during training. This inflates validation
-    metrics and causes dramatic performance collapse in live trading — a form
-    of look-ahead bias. Temporal splitting strictly enforces that the model
-    only ever trains on data that predates its evaluation data.
     """
-    n_samples = len(samples)
+    n_samples = len(samples) if not isinstance(samples, int) else samples
     n_train = int(n_samples * train_ratio)
     n_val   = int(n_samples * val_ratio)
 
-    train_samples = list(samples[0:n_train])
-    val_samples   = list(samples[n_train:n_train + n_val])
-    test_samples  = list(samples[n_train + n_val:n_samples])
+    if isinstance(samples, int):
+        train_samples = list(range(0, n_train))
+        val_samples   = list(range(n_train, n_train + n_val))
+        test_samples  = list(range(n_train + n_val, n_samples))
+    else:
+        train_samples = list(samples[0:n_train])
+        val_samples   = list(samples[n_train:n_train + n_val])
+        test_samples  = list(samples[n_train + n_val:n_samples])
 
     log.info(
         "Temporal split — train: %d  val: %d  test: %d  (total: %d)",

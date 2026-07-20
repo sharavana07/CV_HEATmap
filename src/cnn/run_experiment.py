@@ -51,7 +51,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.amp import GradScaler
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # ── Path bootstrap (must come before any cnn.* imports) ──────────────────────
 _SRC = Path(__file__).resolve().parents[1]   # CV_HEATmap/src/
@@ -149,14 +149,10 @@ def _load_data(experiment: ExperimentLogger):
 def _build_training_objects(device: torch.device):
     """Instantiate model, optimiser, scheduler, scaler, stopper."""
     model     = OrderBookCNN().to(device)
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.LEARNING_RATE, weight_decay=cfg.WEIGHT_DECAY
     )
-    scheduler = ReduceLROnPlateau(
-        optimizer, mode="min",
-        factor=cfg.LR_FACTOR, patience=cfg.LR_PATIENCE,
-        min_lr=cfg.LR_MIN,
-    )
+    scheduler = CosineAnnealingLR(optimizer, T_max=max(1, cfg.NUM_EPOCHS))
     _amp_device = device.type if device.type == "cuda" else "cpu"
     scaler  = GradScaler(_amp_device, enabled=cfg.USE_AMP and device.type == "cuda")
     stopper = EarlyStopping(
@@ -185,7 +181,7 @@ def _run_training(
     print_model_summary(model)
     log_gpu_memory("after model init")
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=cfg.LABEL_SMOOTHING)
 
     history: Dict[str, List] = {
         "train_loss": [], "val_loss": [],
@@ -225,7 +221,7 @@ def _run_training(
         lr_now   = optimizer.param_groups[0]["lr"]
         gpu_util = _try_get_gpu_util()
 
-        scheduler.step(val_loss)
+        scheduler.step()
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
