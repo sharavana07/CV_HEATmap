@@ -56,8 +56,7 @@ from sklearn.metrics import (
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cnn import config as cfg
-# from cnn.model import OrderBookCNN
-from model_se import OrderBookCNN
+from cnn.models import get_model
 from cnn.dataset import build_dataloaders
 from cnn.utils import get_device
 
@@ -366,30 +365,46 @@ def evaluate(
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import argparse
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
         datefmt="%H:%M:%S",
     )
 
+    parser = argparse.ArgumentParser(description="Evaluate a trained OrderBookCNN model")
+    parser.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        choices=[cfg.MODEL_CNN, cfg.MODEL_CNN_SE, cfg.MODEL_DAFNET],
+        help="Which model to evaluate (cnn, cnn_se, dafnet)",
+    )
+    args = parser.parse_args()
+
+    cfg.MODEL_NAME = args.model
+
+    checkpoint_map = {
+        cfg.MODEL_CNN: cfg.BEST_CNN_MODEL,
+        cfg.MODEL_CNN_SE: cfg.BEST_CNN_SE_MODEL,
+        cfg.MODEL_DAFNET: cfg.BEST_DAFNET_MODEL,
+    }
+    checkpoint_path = checkpoint_map[args.model]
+
     device = get_device()
+    model = get_model(args.model).to(device)
 
-    # Load model
-    model = OrderBookCNN().to(device)
-    if not cfg.BEST_MODEL_PATH.exists():
-        log.error("No checkpoint found at %s — run train.py first.", cfg.BEST_MODEL_PATH)
+    if not checkpoint_path.exists():
+        log.error("No checkpoint found at %s — run train.py for this model first.", checkpoint_path)
         raise SystemExit(1)
-    model.load_state_dict(torch.load(str(cfg.BEST_MODEL_PATH), map_location=device))
-    log.info("Loaded checkpoint: %s", cfg.BEST_MODEL_PATH)
 
-    # Raw, 3-class, file-order-aligned labels (0=DOWN, 1=FLAT, 2=UP).
-    # No filtering, remapping, or splitting here — build_dataloaders() owns
-    # all of that internally, exactly as it does in train.py.
-    lbl_path   = cfg.LABELS_PATH if cfg.LABELS_PATH.exists() else cfg.LABELS_ALT_PATH
+    model.load_state_dict(torch.load(str(checkpoint_path), map_location=device))
+    log.info("Loaded checkpoint: %s", checkpoint_path)
+
+    lbl_path = cfg.LABELS_PATH if cfg.LABELS_PATH.exists() else cfg.LABELS_ALT_PATH
     raw_labels = np.load(str(lbl_path))
 
-    # DataLoaders (re-create with the same raw labels/heatmaps used in
-    # training, so the temporal split and normalisation stats match).
     if cfg.HEATMAP_DIR.exists():
         _, _, test_loader, _, _ = build_dataloaders(raw_labels, heatmap_dir=cfg.HEATMAP_DIR)
     else:
@@ -397,17 +412,12 @@ if __name__ == "__main__":
         arr = np.random.rand(len(raw_labels), cfg.IMG_HEIGHT, cfg.IMG_WIDTH).astype(np.float32)
         _, _, test_loader, _, _ = build_dataloaders(raw_labels, heatmap_array=arr)
 
-    # The test split's global heatmap indices come straight from the Sample
-    # objects the dataset pipeline built — the only place indices are read
-    # from. This is guaranteed to line up 1:1 with what run_inference()
-    # iterates over, since it's the same underlying dataset.
     test_indices = np.array(
         [sample.global_idx for sample in test_loader.dataset.samples],
         dtype=np.int64,
     )
 
-    # Load training history if available
-    hist_path = cfg.RESULTS_DIR / "training_history.json"
-    history   = json.loads(hist_path.read_text()) if hist_path.exists() else None
+    hist_path = cfg.RESULTS_DIR / f"training_history_{args.model}.json"
+    history = json.loads(hist_path.read_text()) if hist_path.exists() else None
 
     evaluate(model, test_loader, test_indices, history=history)

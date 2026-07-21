@@ -30,8 +30,14 @@ RESULTS_DIR     = OUTPUT_DIR / "results"
 for _d in [OUTPUT_DIR, CHECKPOINT_DIR, PLOT_DIR, RESULTS_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
 
+# Generic checkpoint (used when only one model is active; kept for backwards compatibility)
 BEST_MODEL_PATH     = CHECKPOINT_DIR / "best_model.pth"
 PREDICTIONS_CSV     = RESULTS_DIR    / "predictions.csv"
+
+# Model‑specific checkpoints – prevents one model from overwriting the other
+BEST_CNN_MODEL      = CHECKPOINT_DIR / "best_cnn.pth"
+BEST_CNN_SE_MODEL   = CHECKPOINT_DIR / "best_cnn_se.pth"
+BEST_DAFNET_MODEL   = CHECKPOINT_DIR / "best_dafnet.pth"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INPUT DIMENSIONS
@@ -61,10 +67,10 @@ PERSISTENT_WORKERS  = True   # keep workers alive between epochs
 PREFETCH_FACTOR     = 2      # batches prefetched per worker
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODEL ARCHITECTURE
+# MODEL ARCHITECTURE (shared settings)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Conv blocks: (out_channels, kernel_size, pool_size)
+# Conv blocks for the baseline CNN: (out_channels, kernel_size, pool_size)
 CONV_BLOCKS = [
     (32, 3, 2),
     (64, 3, 2),
@@ -124,3 +130,60 @@ SEED = 42
 CUDNN_BENCHMARK = True   # faster conv ops when input size is fixed
 VERBOSE         = True   # print per-epoch stats
 LOG_INTERVAL    = 50     # print training loss every N batches
+
+# ------------------------------------------------
+# Model Selection
+# ------------------------------------------------
+MODEL_CNN   = "cnn"
+MODEL_DAFNET = "dafnet"
+MODEL_CNN_SE = "cnn_se"
+
+# Change this line to switch between architectures:
+#   MODEL_NAME = MODEL_CNN
+#   MODEL_NAME = MODEL_DAFNET
+MODEL_NAME = MODEL_DAFNET
+
+# -----------------------------
+# DAFNet Configuration
+# -----------------------------
+DAFNET_CONFIG = {
+
+    # Input – mirrors project‑level constants to keep everything in sync
+    "in_channels": IN_CHANNELS,
+    "input_height": IMG_HEIGHT,
+    "input_width": IMG_WIDTH,
+    "num_classes": NUM_CLASSES,
+
+    # Stem
+    "stem_channels": 16,
+
+    # Dual branches
+    "branch_channels": 32,
+    "fusion_channels": 32,
+
+    # Price‑Level Encoder (PLE)
+    "ple_kernel": 5,
+    "ple_dilations": (1, 2),
+
+    # Temporal Feature Encoder (TFE)
+    "tfe_kernel": 3,
+    "tfe_dilations": (1, 2, 4, 8),
+
+    # Refinement stack
+    "refine_stages": (
+        (64, 2),
+        (64, 1),
+        (96, 2),
+    ),
+
+    # Attention settings
+    "se_reduction": 8,       # squeeze‑and‑excitation reduction ratio
+    "daap_hidden": 32,       # hidden size for Dual‑Axis Attention Pooling
+
+    # Classifier head
+    "head_hidden": 64,
+    "dropout": DROPOUT_RATE, # uses the same dropout as the baseline CNN for fair comparison
+
+    # Activation – try "gelu" vs "silu" later without touching the model code
+    "activation": "gelu",
+}

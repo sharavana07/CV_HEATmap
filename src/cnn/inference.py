@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -40,12 +41,12 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cnn import config as cfg
-from cnn.model import OrderBookCNN
+from cnn.models import get_model          # architecture-agnostic
 from cnn.utils import get_device
 
 log = logging.getLogger(__name__)
@@ -114,21 +115,46 @@ class InferenceEngine:
 
     def __init__(
         self,
-        checkpoint_path:      Path  = cfg.BEST_MODEL_PATH,
+        checkpoint_path:      Optional[Path] = None,
         norm_stats_path:      Optional[Path] = None,
         device:               Optional[torch.device] = None,
         confidence_threshold: float = 0.5,
     ) -> None:
+        # Default checkpoint: pick the one belonging to the active architecture
+        if checkpoint_path is None:
+            checkpoint_path = self._default_checkpoint()
+
         self.device    = device or get_device()
         self.threshold = confidence_threshold
         self.model     = self._load_model(checkpoint_path)
         self.mean, self.std = self._load_norm_stats(norm_stats_path)
 
         log.info(
-            "InferenceEngine ready — device: %s  threshold: %.2f  "
+            "InferenceEngine ready — model: %s  device: %s  threshold: %.2f  "
             "mean: %.5f  std: %.5f",
-            self.device, self.threshold, self.mean, self.std,
+            cfg.MODEL_NAME, self.device, self.threshold, self.mean, self.std,
         )
+
+    @staticmethod
+    def _default_checkpoint() -> Path:
+        """
+        Return the best-model path corresponding to the active architecture.
+        Falls back to a simple config lookup if a centralized function is
+        not yet present.
+        """
+        if hasattr(cfg, "get_best_model_path"):
+            return cfg.get_best_model_path()
+
+        # Manual selection — keep this in sync with evaluate.py
+        if cfg.MODEL_NAME == cfg.MODEL_CNN:
+            return cfg.BEST_CNN_MODEL
+        elif cfg.MODEL_NAME == cfg.MODEL_DAFNET:
+            return cfg.BEST_DAFNET_MODEL
+        else:
+            raise ValueError(
+                f"Unknown model name: {cfg.MODEL_NAME}. "
+                "Set cfg.MODEL_NAME to a recognized value."
+            )
 
     # ------------------------------------------------------------------
     def _load_model(self, path: Path) -> nn.Module:
@@ -136,21 +162,24 @@ class InferenceEngine:
         if not path.exists():
             raise FileNotFoundError(
                 f"Model checkpoint not found: {path}\n"
-                "Run train.py first to generate best_model.pth."
+                "Run train.py first to generate a checkpoint."
             )
 
-        model = OrderBookCNN().to(self.device)
+        model = get_model().to(self.device)
 
         # Handle both model-only and full-checkpoint formats
         payload = torch.load(str(path), map_location=self.device)
         if isinstance(payload, dict) and "model" in payload:
             # full_checkpoint.pth
             model.load_state_dict(payload["model"])
-            log.info("Loaded full checkpoint (epoch %d) ← %s", payload.get("epoch", "?"), path)
+            log.info(
+                "Loaded %s full checkpoint (epoch %d) ← %s",
+                cfg.MODEL_NAME, payload.get("epoch", "?"), path,
+            )
         else:
             # best_model.pth (state_dict only)
             model.load_state_dict(payload)
-            log.info("Loaded model weights ← %s", path)
+            log.info("Loaded %s model weights ← %s", cfg.MODEL_NAME, path)
 
         model.eval()
         return model
@@ -346,8 +375,9 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--input", type=Path, required=True,
                    help=".npy file or directory of .npy files")
-    p.add_argument("--model", type=Path, default=cfg.BEST_MODEL_PATH,
-                   help="Path to checkpoint (default: best_model.pth)")
+    # The default is now architecture-aware — None triggers auto-detection in __init__
+    p.add_argument("--model", type=Path, default=None,
+                   help="Path to checkpoint (default: best model for active architecture)")
     p.add_argument("--output", type=Path, default=None,
                    help="Output CSV path for batch mode")
     p.add_argument("--threshold", type=float, default=0.5,
@@ -358,7 +388,6 @@ def _parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    import torch.nn as nn  # needed for type annotation in _load_model
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
@@ -368,7 +397,7 @@ if __name__ == "__main__":
     args = _parse_args()
 
     engine = InferenceEngine(
-        checkpoint_path=args.model,
+        checkpoint_path=args.model,   # None → architecture default
         norm_stats_path=args.norm_stats,
         confidence_threshold=args.threshold,
     )

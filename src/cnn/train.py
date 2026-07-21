@@ -1,29 +1,15 @@
 """
-train.py — Full training loop for OrderBookCNN.
+train.py — Full training loop, now fully model‑aware.
 
-Features
-────────
-  • CUDA + mixed-precision AMP (torch.cuda.amp) for RTX 2050
-  • Gradient clipping
-  • ReduceLROnPlateau learning-rate scheduler
-  • Early stopping (validation-loss-based)
-  • Best-model checkpoint saving (best_model.pth)
-  • Per-epoch metrics: loss, accuracy, LR, epoch time
-  • GPU utilisation logging (via pynvml if available)
-  • Training history saved to outputs/results/training_history.json
-
-Label ownership
-────────────────
-train.py does NOT do any label filtering, remapping, or index alignment.
-dataset.build_dataloaders() owns that entirely: it accepts the ORIGINAL raw
-3-class label array (0=DOWN, 1=FLAT, 2=UP), drops FLAT rows, remaps
-DOWN/UP -> 0/1, and pairs each surviving label with its correct global
-heatmap index internally. train.py only ever loads raw_labels and hands
-them off — see the __main__ block below.
+The pipeline itself (AMP, scheduler, optimiser, early stopping,
+dataloaders, normalisation) remains architecture‑agnostic.
+Only checkpoint paths and the history file are now derived
+from `cfg.MODEL_NAME`.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import time
@@ -39,13 +25,33 @@ from torch.utils.data import DataLoader
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from cnn import config as cfg
-from cnn.model import OrderBookCNN, print_model_summary
-from model_se import OrderBookCNN
-from cnn.dataset import build_dataloaders
-from cnn.utils import set_seed, get_device, EarlyStopping
+
+try:
+    from src.cnn import config as cfg
+    from src.cnn.models import get_model
+    from src.cnn.model import print_model_summary  # generic, works on any nn.Module
+    from src.cnn.dataset import build_dataloaders
+    from src.cnn.utils import set_seed, get_device, EarlyStopping
+except ImportError:  # pragma: no cover - fallback for direct script execution
+    from cnn import config as cfg
+    from cnn.models import get_model
+    from cnn.model import print_model_summary  # generic, works on any nn.Module
+    from cnn.dataset import build_dataloaders
+    from cnn.utils import set_seed, get_device, EarlyStopping
 
 log = logging.getLogger(__name__)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser for runtime model selection."""
+    parser = argparse.ArgumentParser(description="Train the CNN-based heatmap classifier")
+    parser.add_argument(
+        "--model",
+        choices=[cfg.MODEL_CNN, cfg.MODEL_CNN_SE, cfg.MODEL_DAFNET],
+        default=cfg.MODEL_NAME,
+        help="Model architecture to train",
+    )
+    return parser
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -66,6 +72,27 @@ def _try_get_gpu_util() -> Optional[float]:
         return float(util.gpu)
     except Exception:
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: pick the correct best‑model path for the active architecture
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_best_model_path(model_name: Optional[str] = None) -> Path:
+    """Return the best-checkpoint path for the chosen architecture."""
+    selected_model_name = model_name or cfg.MODEL_NAME
+    mapping = {
+        cfg.MODEL_CNN:     cfg.BEST_CNN_MODEL,
+        cfg.MODEL_CNN_SE:  cfg.BEST_CNN_SE_MODEL,
+        cfg.MODEL_DAFNET:  cfg.BEST_DAFNET_MODEL,
+    }
+    try:
+        return mapping[selected_model_name]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown MODEL_NAME '{selected_model_name}'. "
+            f"Expected one of {list(mapping.keys())}"
+        ) from exc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -158,7 +185,8 @@ def _eval_epoch(
 def train(
     train_loader: DataLoader,
     val_loader:   DataLoader,
-) -> Tuple[OrderBookCNN, Dict[str, List]]:
+    model_name: Optional[str] = None,
+) -> Tuple[nn.Module, Dict[str, List]]:
     """
     Full training loop.
 
@@ -172,13 +200,14 @@ def train(
     device = get_device()
 
     # ── Model ─────────────────────────────────────────────────────────
-    model = OrderBookCNN().to(device)
+    selected_model_name = model_name or cfg.MODEL_NAME
+    model = get_model(selected_model_name).to(device)
+    log.info("Architecture: %s", selected_model_name)
     if cfg.VERBOSE:
         print_model_summary(model)
 
     # ── Loss / Optimiser ──────────────────────────────────────────────
     criterion = nn.CrossEntropyLoss()
-    # FIX 1: Use AdamW for correct weight-decoupling
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg.LEARNING_RATE,
@@ -195,10 +224,15 @@ def train(
 
     _amp_device = device.type if device.type == "cuda" else "cpu"
     scaler  = GradScaler(_amp_device, enabled=cfg.USE_AMP and device.type == "cuda")
+
+    # Model-aware checkpoint path
+    best_ckpt_path = _get_best_model_path(model_name=selected_model_name)
+    best_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+
     stopper = EarlyStopping(
         patience=cfg.EARLY_STOP_PATIENCE,
         delta=cfg.EARLY_STOP_DELTA,
-        path=cfg.BEST_MODEL_PATH,
+        path=best_ckpt_path,
     )
 
     # ── History ───────────────────────────────────────────────────────
@@ -222,7 +256,7 @@ def train(
 
         elapsed   = time.perf_counter() - t0
 
-        # FIX 2: scheduler step BEFORE reading LR so logged value matches next epoch
+        # Scheduler step BEFORE reading LR so logged value matches next epoch
         scheduler.step(val_loss)
         lr_now    = optimizer.param_groups[0]["lr"]
         gpu_util  = _try_get_gpu_util()
@@ -252,11 +286,11 @@ def train(
             break
 
     # ── Load best checkpoint ──────────────────────────────────────────
-    log.info("Loading best model from %s", cfg.BEST_MODEL_PATH)
-    model.load_state_dict(torch.load(str(cfg.BEST_MODEL_PATH), map_location=device))
+    log.info("Loading best model from %s", best_ckpt_path)
+    model.load_state_dict(torch.load(str(best_ckpt_path), map_location=device))
 
-    # ── Save history ──────────────────────────────────────────────────
-    hist_path = cfg.RESULTS_DIR / "training_history.json"
+    # ── Save history (model‑specific filename) ────────────────────────
+    hist_path = cfg.RESULTS_DIR / f"training_history_{selected_model_name}.json"
     with open(hist_path, "w") as f:
         json.dump(history, f, indent=2)
     log.info("Training history saved → %s", hist_path)
@@ -269,6 +303,9 @@ def train(
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    parser = build_arg_parser()
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
@@ -281,10 +318,6 @@ if __name__ == "__main__":
         log.error("Label file not found at %s or %s", cfg.LABELS_PATH, cfg.LABELS_ALT_PATH)
         raise SystemExit(1)
 
-    # Raw, 3-class, file-order-aligned labels (0=DOWN, 1=FLAT, 2=UP).
-    # No filtering or remapping here — dataset.build_dataloaders() owns that
-    # (it needs the untouched array so global heatmap indices stay correct
-    # once FLAT rows are dropped internally).
     raw_labels = np.load(str(lbl_path))
     log.info(
         "Raw labels loaded: %s  (DOWN=0: %d  FLAT=1: %d  UP=2: %d)",
@@ -317,9 +350,10 @@ if __name__ == "__main__":
     log.info("Normalisation stats saved → %s", norm_path)
 
     # ── Train ─────────────────────────────────────────────────────────
-    model, history = train(train_loader, val_loader)
+    model, history = train(train_loader, val_loader, model_name=args.model)
 
-    log.info("Training complete. Best model → %s", cfg.BEST_MODEL_PATH)
+    best_ckpt = _get_best_model_path(model_name=args.model)
+    log.info("Training complete. Best model → %s", best_ckpt)
     log.info(
         "Final val_loss: %.4f  val_acc: %.4f",
         min(history["val_loss"]),
