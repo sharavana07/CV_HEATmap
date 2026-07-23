@@ -18,6 +18,9 @@ runs/
 *.pth
 *.pt
 
+# NumPy arrays
+*.npy
+
 # Generated data
 src/data/
 outputs/
@@ -25,3 +28,7 @@ outputs/
 # Misc
 .DS_Store
 Thumbs.db
+
+# Evaluation sample heatmaps
+obh_eval/experiments/CNN/samples/
+
