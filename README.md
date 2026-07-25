@@ -35,3 +35,7 @@ This project trains a convolutional neural network on order-book heatmaps to pre
 - The training pipeline uses temporal splitting to avoid look-ahead bias.
 - The model outputs binary labels for `DOWN` vs `UP`.
 - Checkpoint and evaluation artifacts are stored in the `outputs/` directory.
+
+
+
+code to execute the program :  python -m src.cnn.train --model cnn

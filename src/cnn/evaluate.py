@@ -1,15 +1,16 @@
 """
 evaluate.py — Comprehensive evaluation of the trained OrderBookCNN.
 
-Outputs
-───────
-  outputs/results/predictions.csv          — per-sample predictions for backtest
-  outputs/results/classification_report.txt
-  outputs/plots/confusion_matrix.png
-  outputs/plots/roc_curve.png
-  outputs/plots/confidence_distribution.png
-  outputs/plots/loss_curves.png
-  outputs/plots/accuracy_curves.png
+Outputs (all named after the model variant, e.g. "cnn")
+──────────────────────────────────────────────────────────
+  outputs/results/predictions_{model}.csv
+  outputs/results/classification_report_{model}.txt
+  outputs/results/test_metrics_{model}.json
+  outputs/plots/confusion_matrix_{model}.png
+  outputs/plots/roc_curve_{model}.png
+  outputs/plots/confidence_distribution_{model}.png
+  outputs/plots/loss_curves_{model}.png
+  outputs/plots/accuracy_curves_{model}.png
 
 All plots are saved automatically; the script can also be imported and its
 functions called from a Jupyter notebook.
@@ -70,6 +71,22 @@ plt.rcParams.update({
     "axes.spines.right":  False,
 })
 COLORS = {"train": "#2196F3", "val": "#FF5722", "test": "#4CAF50"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: model‑specific filenames
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _model_path(filename: str, model_name: str, base_dir: Path) -> Path:
+    """Insert `model_name` before the file extension.
+
+    Example:
+        _model_path("predictions.csv", "cnn", results_dir)
+        -> results_dir / "predictions_cnn.csv"
+    """
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    return base_dir / f"{stem}_{model_name}{suffix}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,7 +273,7 @@ def save_predictions_csv(
     true:       np.ndarray,
     pred:       np.ndarray,
     prob_up:    np.ndarray,
-    path:       Path = cfg.PREDICTIONS_CSV,
+    path:       Path = cfg.PREDICTIONS_CSV,   # kept for backwards compat
 ) -> None:
     """
     Export per-sample predictions in a format ready for the trading backtest.
@@ -289,9 +306,14 @@ def evaluate(
     test_loader:  torch.utils.data.DataLoader,
     test_indices: np.ndarray,
     history:      Optional[Dict[str, List]] = None,
+    model_name:   Optional[str] = None,              # model‑specific naming
 ) -> Dict[str, float]:
     """
     Run full evaluation: metrics, plots, predictions CSV.
+
+    All output files are automatically named after the model variant
+    (e.g. "cnn", "cnn_se", "dafnet") so that multiple model evaluations
+    can coexist without overwriting.
 
     Parameters
     ----------
@@ -303,6 +325,9 @@ def evaluate(
                    must come from the test dataset itself, never recomputed
     history      : training history dict (from train.py); if supplied,
                    loss/accuracy curves are plotted
+    model_name   : optional string for the model variant (e.g., "cnn",
+                   "cnn_se", "dafnet"). If None, falls back to cfg.MODEL_NAME.
+                   Used to generate unique filenames for all outputs.
     """
     device = get_device()
     model  = model.to(device)
@@ -323,14 +348,28 @@ def evaluate(
     metrics, fpr, tpr = compute_metrics(true, pred, prob_up)
     print_metrics(metrics)
 
-    # Classification report (per-class precision/recall)
+    # ── Resolve model‑specific output paths ───────────────────────────
+    model_name = model_name or cfg.MODEL_NAME          # fallback to global config
+
+    # Results (text / CSV)
+    pred_csv_path = _model_path("predictions.csv",              model_name, cfg.RESULTS_DIR)
+    rpt_path      = _model_path("classification_report.txt",   model_name, cfg.RESULTS_DIR)
+    summary_path  = _model_path("test_metrics.json",           model_name, cfg.RESULTS_DIR)
+
+    # Plots
+    cm_path       = _model_path("confusion_matrix.png",         model_name, cfg.PLOT_DIR)
+    roc_path      = _model_path("roc_curve.png",               model_name, cfg.PLOT_DIR)
+    conf_path     = _model_path("confidence_distribution.png", model_name, cfg.PLOT_DIR)
+    loss_plot_path = _model_path("loss_curves.png",            model_name, cfg.PLOT_DIR)
+    acc_plot_path  = _model_path("accuracy_curves.png",        model_name, cfg.PLOT_DIR)
+
+    # ── Classification report ────────────────────────────────────────
     report = classification_report(
         true, pred,
         target_names=["DOWN (0)", "UP (1)"],
         digits=4,
     )
     print(report)
-    rpt_path = cfg.RESULTS_DIR / "classification_report.txt"
     rpt_path.write_text(report)
     log.info("Classification report saved → %s", rpt_path)
 
@@ -341,18 +380,18 @@ def evaluate(
     )
 
     # ── Plots ─────────────────────────────────────────────────────────
-    plot_confusion_matrix(true, pred)
-    plot_roc_curve(true, prob_up, metrics["auc"])
-    plot_confidence_distribution(prob_up, true)
+    plot_confusion_matrix(true, pred, path=cm_path)
+    plot_roc_curve(true, prob_up, metrics["auc"], path=roc_path)
+    plot_confidence_distribution(prob_up, true, path=conf_path)
 
     if history is not None:
-        plot_training_curves(history)
+        plot_training_curves(history, loss_path=loss_plot_path, acc_path=acc_plot_path)
 
     # ── Predictions CSV ───────────────────────────────────────────────
-    save_predictions_csv(test_indices, true, pred, prob_up)
+    save_predictions_csv(test_indices, true, pred, prob_up, path=pred_csv_path)
+    log.info(f"Predictions saved to:\n{pred_csv_path}")
 
     # ── Summary JSON ──────────────────────────────────────────────────
-    summary_path = cfg.RESULTS_DIR / "test_metrics.json"
     with open(summary_path, "w") as f:
         json.dump({k: round(float(v), 6) for k, v in metrics.items()}, f, indent=2)
     log.info("Test metrics saved → %s", summary_path)
@@ -420,4 +459,4 @@ if __name__ == "__main__":
     hist_path = cfg.RESULTS_DIR / f"training_history_{args.model}.json"
     history = json.loads(hist_path.read_text()) if hist_path.exists() else None
 
-    evaluate(model, test_loader, test_indices, history=history)
+    evaluate(model, test_loader, test_indices, history=history, model_name=args.model)
